@@ -207,13 +207,56 @@
   controlsBar.appendChild(camSelect); controlsBar.appendChild(startBtn); controlsBar.appendChild(stopBtn); controlsBar.appendChild(statusSpan);
   readerDiv.parentNode.insertBefore(controlsBar, readerDiv.nextSibling);
 
+  // Add a tiny diag panel
+  const diag = document.createElement('div');
+  diag.className = 'muted';
+  diag.style.fontSize = '11px';
+  diag.style.marginTop = '6px';
+  diag.id = 'diag';
+  readerDiv.parentNode.insertBefore(diag, controlsBar.nextSibling);
+  function updateDiag(msg){
+    const secure = (window.isSecureContext ? 'secure' : 'insecure');
+    const hasMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    const txt = `[${secure}] mediaDevices:${hasMedia?'yes':'no'} ${msg||''}`;
+    diag.textContent = txt;
+  }
+  updateDiag('ready');
+
   let html5qrcode; // instance started
 
   async function populateCameras(){
     try{
-      const cams = await Html5Qrcode.getCameras();
+      // iOS Safari often needs a user gesture + a real getUserMedia call before labels/devices appear
+      // We only probe if no permission has been granted yet.
+      if (navigator.permissions && navigator.permissions.query){
+        try {
+          const p = await navigator.permissions.query({ name: 'camera' });
+          if (p.state !== 'granted') {
+            // Do a silent probe to unlock enumerateDevices; user will get a prompt if needed
+            try {
+              const s = await navigator.mediaDevices.getUserMedia({ video: true });
+              s.getTracks().forEach(t=>t.stop());
+            } catch(e) { /* ignore; user may deny here, we still show Start */ }
+          }
+        } catch(e) { /* permissions API not supported */ }
+      }
+
+      const cams = (await Html5Qrcode.getCameras()) || [];
       camSelect.innerHTML = '';
-      if (!cams.length){ statusSpan.textContent = 'No cameras found'; return; }
+      if (!cams.length){ statusSpan.textContent = 'No cameras found (check permissions)'; return; }
+      cams.forEach((c,i)=>{
+        const opt = document.createElement('option');
+        opt.value = c.id; opt.textContent = c.label || `Camera ${i+1}`;
+        camSelect.appendChild(opt);
+      });
+      const back = cams.find(c => /back|rear|environment/i.test(c.label||''));
+      if (back) camSelect.value = back.id;
+      statusSpan.textContent = 'Ready';
+    }catch(err){
+      console.error('populateCameras error', err);
+      statusSpan.textContent = 'Camera access blocked. Tap Start and allow camera.';
+    }
+  }
       cams.forEach((c,i)=>{
         const opt = document.createElement('option');
         opt.value = c.id; opt.textContent = c.label || `Camera ${i+1}`;
@@ -257,6 +300,38 @@
     try{
       statusSpan.textContent = 'Starting…';
       const config = { fps: 10, qrbox: 280, experimentalFeatures: { useBarCodeDetectorIfSupported: true } };
+      if (!html5qrcode){ html5qrcode = new Html5Qrcode('reader', { verbose: false }); }
+
+      const deviceId = camSelect && camSelect.value ? { deviceId: { exact: camSelect.value } } : null;
+
+      // Try preferred deviceId; if not available, fall back to facingMode environment → user
+      try {
+        if (deviceId){
+          await html5qrcode.start(deviceId, config, onDecoded);
+        } else {
+          await html5qrcode.start({ facingMode: { exact: 'environment' } }, config, onDecoded);
+        }
+      } catch(e1){
+        try {
+          await html5qrcode.start({ facingMode: 'environment' }, config, onDecoded);
+        } catch(e2){
+          await html5qrcode.start({ facingMode: 'user' }, config, onDecoded);
+        }
+      }
+
+      statusSpan.textContent = 'Scanning…';
+      startBtn.disabled = true; stopBtn.disabled = false; camSelect.disabled = true;
+    }catch(err){
+      console.error('start error', err);
+      alert('Could not start camera :(
+
+Fixes to try:
+• In browser permissions, allow Camera for this site.
+• On iPhone: Settings → Safari → Camera → Allow.
+• If using Private Browsing, try a normal tab.');
+      statusSpan.textContent = 'Blocked. See alert.';
+    }
+  } };
       if (!html5qrcode){ html5qrcode = new Html5Qrcode('reader', { verbose: false }); }
       await html5qrcode.start({ deviceId: { exact: camSelect.value } }, config, onDecoded);
       statusSpan.textContent = 'Scanning…';
