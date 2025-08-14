@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QR Scanner Intake (Auto-Redirect + List)</title>
+  <style>
+    :root { --bg:#0b0b10; --fg:#e8e8ef; --muted:#9aa0a6; --accent:#8ab4f8; }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--fg)}
+    header{padding:16px 20px;border-bottom:1px solid #222}
+    h1{margin:0;font-size:18px}
+    main{display:grid;grid-template-columns:1.2fr 1fr;gap:16px;padding:16px}
+    .card{background:#111;border:1px solid #222;border-radius:14px;box-shadow:0 4px 20px rgba(0,0,0,.2)}
+    .card h2{margin:0 0 8px 0;font-size:14px;color:var(--muted);font-weight:600;letter-spacing:.4px}
+    .card .content{padding:14px}
+    #reader{width:100%;min-height:360px}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    label{font-size:12px;color:var(--muted)}
+    input[type="text"], input[type="url"], input[type="number"], textarea, select{
+      width:100%;padding:10px;border-radius:10px;border:1px solid #2a2a2a;background:#0f0f12;color:var(--fg)
+    }
+    textarea{min-height:100px}
+    button{appearance:none;border:1px solid #2a2a2a;background:#0f0f12;color:var(--fg);padding:10px 12px;border-radius:10px;cursor:pointer}
+    button.primary{background:var(--accent);color:#081018;border-color:transparent}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{padding:8px;border-bottom:1px solid #222;vertical-align:top}
+    th{color:var(--muted);font-weight:600;text-align:left}
+    .muted{color:var(--muted)}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#1a1f2b;color:#a9c7ff;font-size:11px;border:1px solid #28324a}
+    .controls{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .inline{display:flex;align-items:center;gap:10px}
+    .right{justify-content:flex-end}
+    footer{padding:12px 16px;color:var(--muted);font-size:12px}
+    @media (max-width: 1024px){ main{grid-template-columns:1fr;}}
+  </style>
+  <!-- QR scanning library -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.9/html5-qrcode.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>QR Scanner Intake <span class="pill">Auto‑Redirect + Log</span></h1>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="content">
+        <h2>Scanner</h2>
+        <div id="reader"></div>
+        <div class="row" style="margin-top:12px">
+          <div style="flex:1 1 220px">
+            <label>Redirect mode</label>
+            <select id="redirectMode">
+              <option value="none">No redirect</option>
+              <option value="scanned-url">Open scanned URL (same tab)</option>
+              <option value="scanned-url-new">Open scanned URL (new tab)</option>
+              <option value="template">Template URL (replace {SCAN})</option>
+            </select>
+          </div>
+          <div style="flex:2 1 340px" id="templateWrap">
+            <label>Template URL (use {SCAN} where the code should go)</label>
+            <input type="url" id="templateUrl" placeholder="https://example.com/checkin?code={SCAN}">
+          </div>
+          <div style="flex:1 1 160px">
+            <label>Redirect delay (ms)</label>
+            <input type="number" id="delayMs" value="300" min="0" step="50">
+          </div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div class="inline">
+            <input type="checkbox" id="continueScanning" checked>
+            <label for="continueScanning">Continue scanning after redirect (new tab mode only)</label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="content">
+        <h2>Log</h2>
+        <div class="controls">
+          <div class="row">
+            <button id="exportCsv">Export CSV</button>
+            <button id="copyJson">Copy JSON</button>
+            <button id="clearList">Clear</button>
+          </div>
+          <div class="row right">
+            <button id="toggleSound">Sound: On</button>
+          </div>
+        </div>
+        <div style="margin-top:10px;max-height:330px;overflow:auto;border:1px solid #222;border-radius:10px">
+          <table id="table">
+            <thead><tr><th>#</th><th>Value</th><th class="muted">When</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="muted" style="margin-top:10px">Saved to this device (localStorage). Export to keep a copy elsewhere.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Tip: If using a tablet at check‑in, choose <b>“Open scanned URL (new tab)”</b> so this scanner page stays open and keeps logging while the destination opens separately.
+  </footer>
+
+<script>
+(function(){
+  const tableBody = document.querySelector('#table tbody');
+  const redirectMode = document.getElementById('redirectMode');
+  const templateUrl = document.getElementById('templateUrl');
+  const delayMs = document.getElementById('delayMs');
+  const continueScanning = document.getElementById('continueScanning');
+  const exportCsvBtn = document.getElementById('exportCsv');
+  const copyJsonBtn = document.getElementById('copyJson');
+  const clearListBtn = document.getElementById('clearList');
+  const toggleSoundBtn = document.getElementById('toggleSound');
+  const templateWrap = document.getElementById('templateWrap');
+
+  let scans = loadScans();
+  let soundOn = true;
+  let lastDecodedAt = 0;
+  const DEBOUNCE_MS = 1000; // prevent duplicate rapid fires
+
+  function loadScans(){
+    try{ return JSON.parse(localStorage.getItem('qr_scans_v1')||'[]'); }catch(e){ return []; }
+  }
+  function saveScans(){ localStorage.setItem('qr_scans_v1', JSON.stringify(scans)); }
+
+  function render(){
+    tableBody.innerHTML = '';
+    scans.forEach((row,i)=>{
+      const tr = document.createElement('tr');
+      const n = document.createElement('td'); n.textContent = i+1;
+      const v = document.createElement('td'); v.textContent = row.value;
+      const t = document.createElement('td'); t.textContent = new Date(row.ts).toLocaleString(); t.className='muted';
+      tr.appendChild(n); tr.appendChild(v); tr.appendChild(t); tableBody.appendChild(tr);
+    });
+  }
+
+  function exportCsv(){
+    const lines = [['index','value','timestamp_iso']].concat(scans.map((r,i)=>[i+1, r.value, new Date(r.ts).toISOString()]));
+    const csv = lines.map(row=>row.map(cell=>`"${String(cell).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], {type:'text/csv'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'qr-scans.csv'; a.click(); URL.revokeObjectURL(url);
+  }
+
+  function copyJson(){
+    navigator.clipboard.writeText(JSON.stringify(scans, null, 2)).then(()=>{
+      flashButton(copyJsonBtn);
+    });
+  }
+
+  function clearList(){
+    if(!confirm('Clear all scans?')) return;
+    scans = []; saveScans(); render();
+  }
+
+  function flashButton(btn){
+    const old = btn.textContent; btn.textContent = '✓';
+    setTimeout(()=>btn.textContent = old, 700);
+  }
+
+  function beep(){
+    if(!soundOn) return;
+    try{
+      const ctx = new (window.AudioContext||window.webkitAudioContext)();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type='square'; o.frequency.setValueAtTime(880, ctx.currentTime);
+      g.gain.setValueAtTime(0.05, ctx.currentTime);
+      o.connect(g).connect(ctx.destination);
+      o.start(); setTimeout(()=>{o.stop(); ctx.close()}, 120);
+    }catch(e){}
+  }
+
+  toggleSoundBtn.addEventListener('click',()=>{
+    soundOn = !soundOn; toggleSoundBtn.textContent = 'Sound: ' + (soundOn? 'On':'Off');
+  });
+  exportCsvBtn.addEventListener('click', exportCsv);
+  copyJsonBtn.addEventListener('click', copyJson);
+  clearListBtn.addEventListener('click', clearList);
+
+  redirectMode.addEventListener('change', ()=>{
+    templateWrap.style.display = (redirectMode.value === 'template') ? 'block':'none';
+  });
+  templateWrap.style.display = 'none';
+
+  render();
+
+  // Initialize QR scanner
+  const html5QrcodeScanner = new Html5QrcodeScanner('reader', { fps: 10, qrbox: 280, rememberLastUsedCamera: true }, false);
+
+  function handleDecoded(decodedText){
+    const now = Date.now();
+    if (now - lastDecodedAt < DEBOUNCE_MS) return; // debounce duplicates
+    lastDecodedAt = now;
+
+    scans.unshift({ value: decodedText, ts: now });
+    saveScans(); render(); beep();
+
+    // Redirect logic
+    const mode = redirectMode.value;
+    const delay = Math.max(0, parseInt(delayMs.value||'0',10));
+
+    function isUrl(s){ try{ new URL(s.startsWith('http')? s : ('https://'+s)); return true;}catch(e){ return false; } }
+
+    if (mode === 'scanned-url' || mode === 'scanned-url-new'){
+      if (!isUrl(decodedText)) return; // only act on URLs
+      const url = decodedText.startsWith('http')? decodedText : ('https://'+decodedText);
+      setTimeout(()=>{
+        if (mode === 'scanned-url-new'){
+          window.open(url, '_blank');
+        } else {
+          window.location.assign(url);
+        }
+      }, delay);
+    } else if (mode === 'template'){
+      const tpl = (templateUrl.value||'').trim();
+      if (!tpl || !tpl.includes('{SCAN}')) return;
+      const url = tpl.replaceAll('{SCAN}', encodeURIComponent(decodedText));
+      setTimeout(()=>{ window.location.assign(url); }, delay);
+    }
+  }
+
+  html5QrcodeScanner.render(handleDecoded, (err)=>{ /* ignore decode errors */ });
+})();
+</script>
+</body>
+</html>
