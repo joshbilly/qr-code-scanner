@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>QR Scanner Intake (Auto-Redirect + List)</title>
+  <title>QR Intake — Scanner + Log + Auto‑Redirect</title>
   <style>
     :root { --bg:#0b0b10; --fg:#e8e8ef; --muted:#9aa0a6; --accent:#8ab4f8; }
     *{box-sizing:border-box}
@@ -21,7 +21,6 @@
     input[type="text"], input[type="url"], input[type="number"], textarea, select{
       width:100%;padding:10px;border-radius:10px;border:1px solid #2a2a2a;background:#0f0f12;color:var(--fg)
     }
-    textarea{min-height:100px}
     button{appearance:none;border:1px solid #2a2a2a;background:#0f0f12;color:var(--fg);padding:10px 12px;border-radius:10px;cursor:pointer}
     button.primary{background:var(--accent);color:#081018;border-color:transparent}
     table{width:100%;border-collapse:collapse;font-size:13px}
@@ -35,12 +34,34 @@
     footer{padding:12px 16px;color:var(--muted);font-size:12px}
     @media (max-width: 1024px){ main{grid-template-columns:1fr;}}
   </style>
-  <!-- QR scanning library -->
-  <script src="https://unpkg.com/html5-qrcode@2.3.9/html5-qrcode.min.js"></script>
+  <!-- Library loader tries UNPKG then jsDelivr to avoid CDN blocks -->
+  <script>
+    function loadQrLib(){
+      return new Promise((resolve, reject)=>{
+        let done = false;
+        function add(src){
+          const s = document.createElement('script');
+          s.src = src; s.async = true;
+          s.onload = ()=>{ if(done) return; done = true; resolve(); };
+          s.onerror = ()=>{ /* try next */ next(); };
+          document.head.appendChild(s);
+        }
+        const cdns = [
+          'https://unpkg.com/html5-qrcode@2.3.9/html5-qrcode.min.js',
+          'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.9/minified/html5-qrcode.min.js'
+        ];
+        function next(){
+          if(!cdns.length){ if(!done) reject(new Error('Failed to load html5-qrcode')); return; }
+          add(cdns.shift());
+        }
+        next();
+      });
+    }
+  </script>
 </head>
 <body>
   <header>
-    <h1>QR Scanner Intake <span class="pill">Auto‑Redirect + Log</span></h1>
+    <h1>QR Intake <span class="pill">Scanner • Log • Auto‑Redirect</span></h1>
   </header>
 
   <main>
@@ -49,6 +70,16 @@
         <h2>Scanner</h2>
         <div id="reader"></div>
         <div class="row" style="margin-top:12px">
+          <div class="inline" style="gap:8px;flex-wrap:wrap">
+            <select id="cameraSelect" style="min-width:220px"></select>
+            <button id="startBtn" class="primary">Start camera</button>
+            <button id="stopBtn" disabled>Stop</button>
+            <span id="status" class="muted">Loading…</span>
+          </div>
+        </div>
+        <div id="diag" class="muted" style="font-size:11px;margin-top:6px"></div>
+
+        <div class="row" style="margin-top:14px">
           <div style="flex:1 1 220px">
             <label>Redirect mode</label>
             <select id="redirectMode">
@@ -65,12 +96,6 @@
           <div style="flex:1 1 160px">
             <label>Redirect delay (ms)</label>
             <input type="number" id="delayMs" value="300" min="0" step="50">
-          </div>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <div class="inline">
-            <input type="checkbox" id="continueScanning" checked>
-            <label for="continueScanning">Continue scanning after redirect (new tab mode only)</label>
           </div>
         </div>
       </div>
@@ -95,46 +120,57 @@
             <tbody></tbody>
           </table>
         </div>
-        <p class="muted" style="margin-top:10px">Saved to this device (localStorage). Export to keep a copy elsewhere.</p>
+        <p class="muted" style="margin-top:10px">Saved locally (browser storage). Export to keep a copy.</p>
       </div>
     </section>
   </main>
 
   <footer>
-    Tip: If using a tablet at check‑in, choose <b>“Open scanned URL (new tab)”</b> so this scanner page stays open and keeps logging while the destination opens separately.
+    Tip: For continuous scanning **and** opening destinations, use “Open scanned URL (new tab)” so this page keeps the camera active.
   </footer>
 
 <script>
 (function(){
-  const tableBody = document.querySelector('#table tbody');
-  const redirectMode = document.getElementById('redirectMode');
-  const templateUrl = document.getElementById('templateUrl');
-  const delayMs = document.getElementById('delayMs');
-  const continueScanning = document.getElementById('continueScanning');
-  const exportCsvBtn = document.getElementById('exportCsv');
-  const copyJsonBtn = document.getElementById('copyJson');
-  const clearListBtn = document.getElementById('clearList');
-  const toggleSoundBtn = document.getElementById('toggleSound');
-  const templateWrap = document.getElementById('templateWrap');
+  const $ = (s)=>document.querySelector(s);
+  const tableBody = $('#table tbody');
+  const camSelect = $('#cameraSelect');
+  const startBtn = $('#startBtn');
+  const stopBtn  = $('#stopBtn');
+  const statusEl = $('#status');
+  const diagEl   = $('#diag');
+  const redirectMode = $('#redirectMode');
+  const templateUrl  = $('#templateUrl');
+  const delayMs      = $('#delayMs');
+  const exportCsvBtn = $('#exportCsv');
+  const copyJsonBtn  = $('#copyJson');
+  const clearListBtn = $('#clearList');
+  const toggleSoundBtn = $('#toggleSound');
+  const templateWrap = $('#templateWrap');
 
   let scans = loadScans();
   let soundOn = true;
   let lastDecodedAt = 0;
   const DEBOUNCE_MS = 1000; // prevent duplicate rapid fires
+  let html5qrcode = null; // instance
+
+  function setStatus(msg){ statusEl.textContent = msg; }
+  function setDiag(msg){
+    const secure = window.isSecureContext ? 'secure' : 'insecure';
+    const hasMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    diagEl.textContent = `[${secure}] mediaDevices:${hasMedia?'yes':'no'} ${msg||''}`;
+  }
 
   function loadScans(){
-    try{ return JSON.parse(localStorage.getItem('qr_scans_v1')||'[]'); }catch(e){ return []; }
+    try{ return JSON.parse(localStorage.getItem('qr_scans_v2')||'[]'); }catch(e){ return []; }
   }
-  function saveScans(){ localStorage.setItem('qr_scans_v1', JSON.stringify(scans)); }
+  function saveScans(){ localStorage.setItem('qr_scans_v2', JSON.stringify(scans)); }
 
   function render(){
     tableBody.innerHTML = '';
     scans.forEach((row,i)=>{
       const tr = document.createElement('tr');
-      const n = document.createElement('td'); n.textContent = i+1;
-      const v = document.createElement('td'); v.textContent = row.value;
-      const t = document.createElement('td'); t.textContent = new Date(row.ts).toLocaleString(); t.className='muted';
-      tr.appendChild(n); tr.appendChild(v); tr.appendChild(t); tableBody.appendChild(tr);
+      tr.innerHTML = `<td>${i+1}</td><td>${escapeHtml(row.value)}</td><td class="muted">${new Date(row.ts).toLocaleString()}</td>`;
+      tableBody.appendChild(tr);
     });
   }
 
@@ -142,7 +178,7 @@
     const lines = [['index','value','timestamp_iso']] 
       .concat(scans.map((r,i)=>[i+1, r.value, new Date(r.ts).toISOString()]));
     const csv = lines
-      .map(row => row.map(cell => `"${String(cell).replace(/"/g,'""')}"`).join(','))
+      .map(row => row.map(cell => `"${String(cell).replace(/\"/g,'""')}"`).join(','))
       .join('
 ');
     const blob = new Blob([csv], {type:'text/csv'});
@@ -181,145 +217,65 @@
     }catch(e){}
   }
 
+  function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
+
   toggleSoundBtn.addEventListener('click',()=>{
     soundOn = !soundOn; toggleSoundBtn.textContent = 'Sound: ' + (soundOn? 'On':'Off');
   });
   exportCsvBtn.addEventListener('click', exportCsv);
   copyJsonBtn.addEventListener('click', copyJson);
   clearListBtn.addEventListener('click', clearList);
-
-  redirectMode.addEventListener('change', ()=>{
-    templateWrap.style.display = (redirectMode.value === 'template') ? 'block':'none';
-  });
+  redirectMode.addEventListener('change', ()=>{ templateWrap.style.display = (redirectMode.value === 'template') ? 'block':'none'; });
   templateWrap.style.display = 'none';
 
   render();
+  setStatus('Loading library…'); setDiag('init');
 
-  // --- Explicit camera start/stop with device picker (fixes iOS/Safari permission) ---
-  const readerDiv = document.getElementById('reader');
-  const controlsBar = document.createElement('div');
-  controlsBar.className = 'row';
-  controlsBar.style.marginTop = '10px';
-  const camSelect = document.createElement('select'); camSelect.id = 'cameraSelect'; camSelect.style.minWidth = '220px';
-  const startBtn = document.createElement('button'); startBtn.textContent = 'Start camera'; startBtn.className = 'primary';
-  const stopBtn = document.createElement('button'); stopBtn.textContent = 'Stop';
-  const statusSpan = document.createElement('span'); statusSpan.className='muted'; statusSpan.style.padding='8px 0 0 8px';
-  controlsBar.appendChild(camSelect); controlsBar.appendChild(startBtn); controlsBar.appendChild(stopBtn); controlsBar.appendChild(statusSpan);
-  readerDiv.parentNode.insertBefore(controlsBar, readerDiv.nextSibling);
+  // Load library, then prepare UI
+  loadQrLib().then(()=>{
+    setStatus('Preparing camera…');
+    prepare();
+  }).catch(err=>{
+    setStatus('Failed to load scanner library'); setDiag(String(err));
+  });
 
-  // Add a tiny diag panel
-  const diag = document.createElement('div');
-  diag.className = 'muted';
-  diag.style.fontSize = '11px';
-  diag.style.marginTop = '6px';
-  diag.id = 'diag';
-  readerDiv.parentNode.insertBefore(diag, controlsBar.nextSibling);
-  function updateDiag(msg){
-    const secure = (window.isSecureContext ? 'secure' : 'insecure');
-    const hasMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-    const txt = `[${secure}] mediaDevices:${hasMedia?'yes':'no'} ${msg||''}`;
-    diag.textContent = txt;
-  }
-  updateDiag('ready');
-
-  let html5qrcode; // instance started
-
-  async function populateCameras(){
+  async function prepare(){
+    // Preflight to unlock enumerateDevices / labels on Safari
     try{
-      // iOS Safari often needs a user gesture + a real getUserMedia call before labels/devices appear
-      // We only probe if no permission has been granted yet.
-      if (navigator.permissions && navigator.permissions.query){
-        try {
-          const p = await navigator.permissions.query({ name: 'camera' });
-          if (p.state !== 'granted') {
-            // Do a silent probe to unlock enumerateDevices; user will get a prompt if needed
-            try {
-              const s = await navigator.mediaDevices.getUserMedia({ video: true });
-              s.getTracks().forEach(t=>t.stop());
-            } catch(e) { /* ignore; user may deny here, we still show Start */ }
-          }
-        } catch(e) { /* permissions API not supported */ }
-      }
+      await navigator.mediaDevices.getUserMedia({ video: true }).then(s => s.getTracks().forEach(t=>t.stop()));
+    }catch(e){ /* user might deny here; they can still hit Start */ }
 
+    // Populate device list
+    try{
       const cams = (await Html5Qrcode.getCameras()) || [];
       camSelect.innerHTML = '';
-      if (!cams.length){ statusSpan.textContent = 'No cameras found (check permissions)'; return; }
+      if (!cams.length){ setStatus('No cameras found. Tap Start and allow.'); return; }
       cams.forEach((c,i)=>{
         const opt = document.createElement('option');
-        opt.value = c.id; opt.textContent = c.label || `Camera ${i+1}`;
-        camSelect.appendChild(opt);
+        opt.value = c.id; opt.textContent = c.label || `Camera ${i+1}`; camSelect.appendChild(opt);
       });
       const back = cams.find(c => /back|rear|environment/i.test(c.label||''));
       if (back) camSelect.value = back.id;
-      statusSpan.textContent = 'Ready';
-    }catch(err){
-      console.error('populateCameras error', err);
-      statusSpan.textContent = 'Camera access blocked. Tap Start and allow camera.';
-    }
-  }
-      cams.forEach((c,i)=>{
-        const opt = document.createElement('option');
-        opt.value = c.id; opt.textContent = c.label || `Camera ${i+1}`;
-        camSelect.appendChild(opt);
-      });
-      // Prefer back camera if present
-      const back = cams.find(c => /back|rear|environment/i.test(c.label||''));
-      if (back) camSelect.value = back.id;
-      statusSpan.textContent = 'Ready';
-    }catch(err){
-      statusSpan.textContent = 'Camera access blocked. Tap Start and allow camera.';
-    }
-  }
-
-  populateCameras();
-
-  function onDecoded(decodedText){
-    const now = Date.now();
-    if (now - lastDecodedAt < DEBOUNCE_MS) return;
-    lastDecodedAt = now;
-    scans.unshift({ value: decodedText, ts: now }); saveScans(); render(); beep();
-
-    const mode = redirectMode.value;
-    const delay = Math.max(0, parseInt(delayMs.value||'0',10));
-    function isUrl(s){ try{ new URL(s.startsWith('http')? s : ('https://'+s)); return true;}catch(e){ return false; } }
-
-    if (mode === 'scanned-url' || mode === 'scanned-url-new'){
-      if (!isUrl(decodedText)) return;
-      const url = decodedText.startsWith('http')? decodedText : ('https://'+decodedText);
-      setTimeout(()=>{
-        if (mode === 'scanned-url-new') window.open(url,'_blank'); else window.location.assign(url);
-      }, delay);
-    } else if (mode === 'template'){
-      const tpl = (templateUrl.value||'').trim(); if (!tpl || !tpl.includes('{SCAN}')) return;
-      const url = tpl.replaceAll('{SCAN}', encodeURIComponent(decodedText));
-      setTimeout(()=>{ window.location.assign(url); }, delay);
-    }
+      setStatus('Ready'); setDiag('devices:'+cams.length);
+    }catch(err){ setStatus('Camera permission blocked. Tap Start and allow.'); }
   }
 
   async function start(){
     try{
-      statusSpan.textContent = 'Starting…';
+      setStatus('Starting…'); setDiag('starting');
       const config = { fps: 10, qrbox: 280, experimentalFeatures: { useBarCodeDetectorIfSupported: true } };
       if (!html5qrcode){ html5qrcode = new Html5Qrcode('reader', { verbose: false }); }
 
-      const deviceId = camSelect && camSelect.value ? { deviceId: { exact: camSelect.value } } : null;
-
-      // Try preferred deviceId; if not available, fall back to facingMode environment → user
+      const selectedId = camSelect && camSelect.value ? { deviceId: { exact: camSelect.value } } : null;
       try {
-        if (deviceId){
-          await html5qrcode.start(deviceId, config, onDecoded);
-        } else {
-          await html5qrcode.start({ facingMode: { exact: 'environment' } }, config, onDecoded);
-        }
+        if (selectedId){ await html5qrcode.start(selectedId, config, onDecoded); }
+        else { await html5qrcode.start({ facingMode: { exact: 'environment' } }, config, onDecoded); }
       } catch(e1){
-        try {
-          await html5qrcode.start({ facingMode: 'environment' }, config, onDecoded);
-        } catch(e2){
-          await html5qrcode.start({ facingMode: 'user' }, config, onDecoded);
-        }
+        try { await html5qrcode.start({ facingMode: 'environment' }, config, onDecoded); }
+        catch(e2){ await html5qrcode.start({ facingMode: 'user' }, config, onDecoded); }
       }
 
-      statusSpan.textContent = 'Scanning…';
+      setStatus('Scanning…'); setDiag('running');
       startBtn.disabled = true; stopBtn.disabled = false; camSelect.disabled = true;
     }catch(err){
       console.error('start error', err);
@@ -328,35 +284,49 @@
 Fixes to try:
 • In browser permissions, allow Camera for this site.
 • On iPhone: Settings → Safari → Camera → Allow.
-• If using Private Browsing, try a normal tab.');
-      statusSpan.textContent = 'Blocked. See alert.';
-    }
-  } };
-      if (!html5qrcode){ html5qrcode = new Html5Qrcode('reader', { verbose: false }); }
-      await html5qrcode.start({ deviceId: { exact: camSelect.value } }, config, onDecoded);
-      statusSpan.textContent = 'Scanning…';
-      startBtn.disabled = true; stopBtn.disabled = false; camSelect.disabled = true;
-    }catch(err){
-      console.error(err);
-      alert('Could not start camera :(
-
-Fixes to try:
-• In browser permissions, allow Camera for this site.
-• On iPhone: Settings → Safari → Camera → Allow.
-• If using Private Browsing, try a normal tab.');
-      statusSpan.textContent = 'Blocked. See alert.';
+• If using Private/Incognito, switch to a normal tab.');
+      setStatus('Blocked'); setDiag(err && (err.name+': '+err.message));
     }
   }
 
   async function stop(){
     try{
       if (html5qrcode){ await html5qrcode.stop(); await html5qrcode.clear(); }
-      startBtn.disabled = false; stopBtn.disabled = true; camSelect.disabled = false; statusSpan.textContent = 'Stopped';
+      startBtn.disabled = false; stopBtn.disabled = true; camSelect.disabled = false; setStatus('Stopped'); setDiag('stopped');
     }catch(err){ console.error(err); }
   }
 
+  function handleRedirect(decodedText){
+    const mode = redirectMode.value;
+    const delay = Math.max(0, parseInt(delayMs.value||'0',10));
+    function isUrl(s){ try{ new URL(s.startsWith('http')? s : ('https://'+s)); return true;}catch(e){ return false; } }
+
+    if (mode === 'scanned-url' || mode === 'scanned-url-new'){
+      if (!isUrl(decodedText)) return;
+      const url = decodedText.startsWith('http')? decodedText : ('https://'+decodedText);
+      setTimeout(()=>{ if (mode === 'scanned-url-new') window.open(url,'_blank'); else window.location.assign(url); }, delay);
+    } else if (mode === 'template'){
+      const tpl = (templateUrl.value||'').trim(); if (!tpl || !tpl.includes('{SCAN}')) return;
+      const url = tpl.replaceAll('{SCAN}', encodeURIComponent(decodedText));
+      setTimeout(()=>{ window.location.assign(url); }, delay);
+    }
+  }
+
+  function onDecoded(decodedText){
+    const now = Date.now();
+    if (now - lastDecodedAt < DEBOUNCE_MS) return; // debounce duplicates
+    lastDecodedAt = now;
+
+    scans.unshift({ value: decodedText, ts: now });
+    saveScans(); render(); beep();
+    if (navigator.vibrate) navigator.vibrate(35);
+
+    handleRedirect(decodedText);
+  }
+
+  // wire buttons
   startBtn.addEventListener('click', start);
-  stopBtn.addEventListener('click', stop); stopBtn.disabled = true;
+  stopBtn.addEventListener('click', stop);
 })();
 </script>
 </body>
